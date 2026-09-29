@@ -1,0 +1,6 @@
+/weix
+/weix.exe
+/dist/
+*.test
+*.out
+.DS_Store
