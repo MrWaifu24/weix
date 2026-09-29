@@ -1,0 +1,1259 @@
+# Security log: Microsoft-Windows-Security-Auditing (unless noted otherwise).
+# Many of these events only appear when the matching Advanced Audit Policy
+# subcategory is enabled; the "audit" hint in each description says which one.
+
+- id: 1102
+  channel: Security
+  provider: Microsoft-Windows-Eventlog
+  name: The audit log was cleared
+  category: log-tampering
+  criticality: high
+  description: >
+    The Security event log was cleared. Always logged, regardless of audit
+    policy. SubjectUserName shows the account that performed the clear.
+  relevance: >
+    Clearing the Security log is a classic anti-forensics step attackers take
+    after privilege escalation or lateral movement to destroy evidence of
+    logons, process creation and account changes. Legitimate clears are rare
+    on production systems and should map to a change ticket.
+  mitre: [T1070.001]
+  fields:
+    - name: SubjectUserName / SubjectDomainName
+      note: Account that cleared the log.
+    - name: SubjectLogonId
+      note: Pivot to the 4624 with the same TargetLogonId to find where the session came from.
+  investigate:
+    - Identify the account and correlate its logon session (4624) to a source host/IP.
+    - Check forwarded copies of the log in your SIEM for the events that were destroyed locally.
+    - Look for 104 (other logs cleared) and wevtutil.exe / Clear-EventLog in process creation logs around the same time.
+    - Verify whether a change request or maintenance window justifies the clear.
+  false_positives:
+    - Administrators clearing logs during troubleshooting or imaging (should be rare and documented).
+  related: [104, 4719, 4688]
+  detection: EventID=1102 on any server or workstation -> alert (high); suppress only for documented maintenance accounts.
+
+- id: 4624
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: An account was successfully logged on
+  category: authentication
+  criticality: low
+  description: >
+    A logon session was created on the machine where the event is logged
+    (the destination). Audit policy - Logon/Logoff > Audit Logon.
+  relevance: >
+    The backbone of authentication analysis. Logon type, source IP and
+    authentication package reveal how an account got in - interactive at the
+    console, over the network (SMB, WinRM, PsExec), via RDP, or with
+    alternate credentials. Unusual combinations are strong lateral-movement
+    and valid-account-abuse signals.
+  mitre: [T1078, T1021]
+  fields:
+    - name: LogonType
+      note: "How the logon happened (2 interactive, 3 network, 10 RDP, 9 runas /netonly ...). Use `weix logon-type <n>`."
+    - name: TargetUserName / TargetDomainName
+      note: Account that logged on.
+    - name: IpAddress / WorkstationName
+      note: Source of the logon; '-' or 127.0.0.1 for local logons.
+    - name: AuthenticationPackageName / LmPackageName
+      note: Kerberos vs NTLM; NTLM V1 or NTLM for domain accounts where Kerberos is expected is suspicious.
+    - name: TargetLogonId
+      note: Session identifier - correlates with 4634/4647 (logoff), 4672 (privileges) and 4688 (processes).
+    - name: ElevatedToken
+      note: '%%1842 (Yes) means the session holds a full admin token.'
+  investigate:
+    - Check whether the source IP/workstation is expected for this account (baseline normal hosts).
+    - Type 3 or 10 logons from workstations to other workstations often indicate lateral movement.
+    - Pair with 4672 on the same TargetLogonId to spot privileged sessions.
+    - Look for a preceding burst of 4625 failures from the same source (password guessing that succeeded).
+    - Type 9 with LogonProcessName seclogo can indicate runas /netonly or pass-the-hash tooling (e.g. Mimikatz sekurlsa::pth).
+  false_positives:
+    - Extremely high volume - service accounts, computer accounts (ending in $), scheduled tasks and monitoring tools log on constantly.
+  related: [4625, 4634, 4647, 4648, 4672, 4776, 4768, 4769]
+  detection: "EventID=4624 AND LogonType IN (3,10) AND source host is a workstation AND target is a workstation -> review; LogonType=9 AND LogonProcessName=seclogo -> alert."
+
+- id: 4625
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: An account failed to log on
+  category: authentication
+  criticality: medium
+  description: >
+    A logon attempt failed. Status and SubStatus contain NTSTATUS codes that
+    explain why. Audit policy - Logon/Logoff > Audit Logon (Failure).
+  relevance: >
+    Bursts of failures reveal brute force and password spraying. The
+    SubStatus distinguishes a wrong password for a real account (0xC000006A)
+    from a non-existent user (0xC0000064) - the former means the attacker
+    already knows valid usernames.
+  mitre: [T1110.001, T1110.003]
+  fields:
+    - name: Status / SubStatus
+      note: "Reason for failure, e.g. 0xC000006A bad password, 0xC0000064 unknown user, 0xC0000234 locked out. Use `weix status <code>`."
+    - name: TargetUserName
+      note: Account that was attempted.
+    - name: IpAddress / WorkstationName
+      note: Source of the attempts.
+    - name: LogonType
+      note: Type 3 (network/SMB) and 10 (RDP) are the most common brute-force vectors.
+  investigate:
+    - Group by IpAddress - many accounts from one source is spraying, many attempts on one account is brute force.
+    - Check for a subsequent 4624 from the same source - a success after failures is a likely compromise.
+    - Check for 4740 lockouts for the targeted accounts.
+    - Externally exposed RDP/SMB hosts should be verified and restricted.
+  false_positives:
+    - Users mistyping passwords, stale credentials on mapped drives, services or mobile devices using an old password after a reset.
+  related: [4624, 4740, 4771, 4776]
+  detection: ">= 10 failures from one IpAddress within 5 minutes -> brute force; >= 10 distinct TargetUserName from one IpAddress within 10 minutes -> password spraying."
+
+- id: 4634
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: An account was logged off
+  category: authentication
+  criticality: info
+  description: >
+    A logon session was destroyed. Audit policy - Logon/Logoff > Audit Logoff.
+  relevance: >
+    Used with 4624 to calculate session duration. Very short network sessions
+    (seconds) repeated across many hosts are typical of automated lateral
+    movement or scanning tools.
+  mitre: []
+  fields:
+    - name: TargetLogonId
+      note: Matches the TargetLogonId of the originating 4624.
+    - name: LogonType
+      note: Same logon type as the session's 4624.
+  investigate:
+    - Correlate with 4624 by TargetLogonId to build session timelines.
+  false_positives:
+    - Normal, high-volume event. Not reliably logged for every session (e.g. when a machine powers off).
+  related: [4624, 4647]
+
+- id: 4647
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: User initiated logoff
+  category: authentication
+  criticality: info
+  description: >
+    A user explicitly logged off an interactive or RDP session (as opposed to
+    the session being torn down by the system, which is 4634).
+  relevance: >
+    Marks the end of hands-on-keyboard activity for interactive sessions,
+    useful for bounding the window of attacker actions during an RDP intrusion.
+  mitre: []
+  fields:
+    - name: TargetUserName / TargetLogonId
+      note: Account and session that logged off.
+  investigate:
+    - Use with 4624 (type 2/10) and 4778/4779 to reconstruct interactive session timelines.
+  false_positives:
+    - Normal user behaviour.
+  related: [4624, 4634, 4779]
+
+- id: 4648
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: A logon was attempted using explicit credentials
+  category: authentication
+  criticality: medium
+  description: >
+    A process logged on using credentials that were explicitly supplied,
+    rather than the credentials of the current session - e.g. runas, net use
+    with /user, or tools that pass credentials to remote systems. Logged on
+    the source machine.
+  relevance: >
+    Recorded on the machine where the attacker is operating, so it exposes
+    lateral movement attempts toward other hosts (TargetServerName) and
+    credential use by tools such as PsExec or scripts with hard-coded
+    passwords.
+  mitre: [T1078, T1021]
+  fields:
+    - name: SubjectUserName
+      note: Account running the process that supplied the credentials.
+    - name: TargetUserName / TargetDomainName
+      note: Credentials that were used.
+    - name: TargetServerName
+      note: Destination server; localhost means runas-style use.
+    - name: ProcessName
+      note: Program that supplied the credentials (e.g. runas.exe, powershell.exe, an unusual binary).
+  investigate:
+    - Check whether the Subject and Target accounts differ in privilege (user supplying admin credentials).
+    - Review ProcessName - scripting hosts or unknown binaries are suspicious.
+    - Pivot to the TargetServerName for a matching 4624 at the same time.
+  false_positives:
+    - Scheduled tasks, backup agents and admins using runas legitimately. Domain controllers log many 4648s for normal operation.
+  related: [4624, 4672, 4688]
+
+- id: 4656
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: A handle to an object was requested
+  category: object-access
+  criticality: medium
+  description: >
+    A process requested a handle to an audited object (file, registry key,
+    kernel object such as a process). Only logged for objects with a SACL -
+    audit policy Object Access > File System / Registry / Kernel Object.
+  relevance: >
+    With a SACL on lsass.exe (Kernel Object auditing), 4656 exposes credential
+    dumping tools opening LSASS for memory reads. On sensitive files it shows
+    who tried to open them and with what access.
+  mitre: [T1003.001]
+  fields:
+    - name: ObjectName
+      note: Object requested (e.g. \Device\HarddiskVolume2\Windows\System32\lsass.exe).
+    - name: ProcessName
+      note: Process requesting the handle.
+    - name: AccessMask / AccessList
+      note: Requested rights; 0x1010 / 0x1410 against LSASS is typical of Mimikatz-style reads.
+  investigate:
+    - Filter on ObjectName ending in lsass.exe and unexpected ProcessName values.
+    - Correlate with Sysmon 10 if Sysmon is deployed.
+  false_positives:
+    - AV/EDR agents and system processes legitimately open LSASS.
+  related: [4663, 10]
+
+- id: 4657
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: A registry value was modified
+  category: persistence
+  criticality: medium
+  description: >
+    A value under an audited registry key was created, modified or deleted.
+    Requires Object Access > Audit Registry and a SACL on the key.
+  relevance: >
+    Put SACLs on autorun locations (Run/RunOnce, Services, Winlogon, IFEO) to
+    catch persistence and defense-evasion changes with the old and new value
+    recorded.
+  mitre: [T1112, T1547.001]
+  fields:
+    - name: ObjectName / ObjectValueName
+      note: Key and value changed.
+    - name: OldValue / NewValue
+      note: Before and after data - look for paths in user-writable directories.
+    - name: ProcessName
+      note: Process that made the change.
+  investigate:
+    - Review NewValue for executables in %TEMP%, %APPDATA%, ProgramData or encoded commands.
+    - Correlate ProcessName with 4688 to find the parent chain.
+  false_positives:
+    - Software installers and updates writing Run keys.
+  related: [4663, 13]
+
+- id: 4662
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: An operation was performed on an object
+  category: credential-access
+  criticality: high
+  description: >
+    An operation was performed on an Active Directory object. Logged on
+    domain controllers when DS Access > Audit Directory Service Access is
+    enabled and the object has a SACL.
+  relevance: >
+    The primary DCSync detection. Replication requests carry the control
+    access rights DS-Replication-Get-Changes
+    (1131f6aa-9c07-11d1-f79f-00c04fc2dcd2) and DS-Replication-Get-Changes-All
+    (1131f6ad-9c07-11d1-f79f-00c04fc2dcd2). When these come from an account
+    that is not a domain controller, someone is pulling password hashes.
+  mitre: [T1003.006]
+  fields:
+    - name: Properties
+      note: Contains the GUIDs of the rights exercised - look for the replication GUIDs.
+    - name: SubjectUserName
+      note: Account that requested the operation - should be a DC computer account (ending in $) for replication.
+    - name: AccessMask
+      note: 0x100 (Control Access) for extended rights such as replication.
+  investigate:
+    - Alert when replication GUIDs appear with a SubjectUserName that is not a DC machine account.
+    - Correlate the SubjectLogonId with 4624 to find the source IP.
+    - Assume krbtgt and privileged hashes are compromised if confirmed.
+  false_positives:
+    - Azure AD Connect / Entra Connect sync accounts legitimately replicate; allow-list them explicitly.
+  related: [4624, 5136]
+  detection: EventID=4662 AND Properties contains 1131f6aa-9c07-11d1-f79f-00c04fc2dcd2 or 1131f6ad-9c07-11d1-f79f-00c04fc2dcd2 AND SubjectUserName not ending in '$' -> alert (critical).
+
+- id: 4663
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: An attempt was made to access an object
+  category: object-access
+  criticality: low
+  description: >
+    An audited object was actually accessed (read, write, delete). Follows a
+    successful 4656. Requires a SACL and Object Access > File System /
+    Registry auditing.
+  relevance: >
+    Shows access to sensitive files and shares - useful for detecting data
+    staging, access to credential stores (NTDS.dit, SAM hive copies) and mass
+    file modification during ransomware encryption.
+  mitre: [T1005, T1486]
+  fields:
+    - name: ObjectName
+      note: File or key accessed.
+    - name: AccessList / AccessMask
+      note: "Type of access: ReadData (0x1), WriteData (0x2), DELETE (0x10000)."
+    - name: ProcessName / SubjectUserName
+      note: Who accessed it and with what program.
+  investigate:
+    - A single process writing or deleting thousands of files in minutes suggests ransomware.
+    - Access to ntds.dit, SAM, SYSTEM or SECURITY hive files outside backups suggests credential theft.
+  false_positives:
+    - Backup software, antivirus scans and indexing services.
+  related: [4656, 4670, 5145]
+
+- id: 4670
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: Permissions on an object were changed
+  category: defense-evasion
+  criticality: medium
+  description: >
+    The security descriptor (DACL) of an audited object was changed.
+  relevance: >
+    Attackers loosen permissions to maintain access or to tamper with files
+    and services (e.g. granting Everyone full control, taking ownership of
+    protected binaries).
+  mitre: [T1222.001]
+  fields:
+    - name: ObjectName
+      note: Object whose permissions changed.
+    - name: OldSd / NewSd
+      note: SDDL before and after - look for added ACEs for Everyone (WD), Authenticated Users (AU) or a specific user.
+    - name: ProcessName
+      note: Program that changed the permissions (icacls.exe, takeown.exe, powershell.exe).
+  investigate:
+    - Decode the SDDL strings and compare the added ACEs.
+    - Check if the object is a service binary, scheduled task or system file.
+  false_positives:
+    - Installers and GPO-driven permission changes.
+  related: [4663, 4656]
+
+- id: 4672
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: Special privileges assigned to new logon
+  category: privilege-use
+  criticality: low
+  description: >
+    A new logon was granted sensitive privileges such as SeDebugPrivilege,
+    SeTcbPrivilege, SeBackupPrivilege or SeImpersonatePrivilege - effectively
+    an administrator-equivalent logon. Logged right after the 4624.
+  relevance: >
+    Identifies privileged sessions. Seeing it for an account that is not
+    supposed to be an administrator, or on hosts where that admin never logs
+    on, indicates privilege escalation or admin credential abuse.
+  mitre: [T1078.002, T1078.003]
+  fields:
+    - name: SubjectUserName / SubjectLogonId
+      note: Account and session - join with 4624 TargetLogonId.
+    - name: PrivilegeList
+      note: SeDebugPrivilege and SeTcbPrivilege are the most security-sensitive.
+  investigate:
+    - Baseline which accounts receive special privileges on which hosts.
+    - Investigate privileged logons for accounts outside admin groups.
+  false_positives:
+    - SYSTEM, LOCAL SERVICE, NETWORK SERVICE and admin accounts generate this constantly - filter those out.
+  related: [4624, 4964]
+
+- id: 4688
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: A new process has been created
+  category: execution
+  criticality: low
+  description: >
+    A process was started. Audit policy - Detailed Tracking > Audit Process
+    Creation. Command-line logging must be enabled separately via GPO
+    ("Include command line in process creation events").
+  relevance: >
+    Native process telemetry. Parent/child relationships and command lines
+    expose malicious execution - Office spawning shells, encoded PowerShell,
+    LOLBins (certutil, mshta, rundll32, regsvr32) and discovery commands
+    (whoami, net, nltest).
+  mitre: [T1059, T1204.002]
+  fields:
+    - name: NewProcessName
+      note: Full path of the new process - watch for binaries in user-writable paths.
+    - name: CommandLine
+      note: Arguments - empty unless command-line auditing is enabled.
+    - name: ParentProcessName
+      note: Parent process (Windows 10 / Server 2016+).
+    - name: TokenElevationType
+      note: '%%1936 full token (elevated), %%1937 elevated via UAC, %%1938 limited.'
+    - name: SubjectLogonId
+      note: Join with 4624 to see which logon session launched it.
+  investigate:
+    - Flag winword.exe/excel.exe/outlook.exe spawning cmd.exe, powershell.exe, wscript.exe or mshta.exe.
+    - Look for -enc / -EncodedCommand, FromBase64String, IEX, DownloadString in CommandLine.
+    - Look for bursts of discovery commands (whoami, ipconfig, net group, nltest /dclist) within a short window.
+    - Check signing status and hash of unknown binaries on the host.
+  false_positives:
+    - Very high volume. Admin scripts and software deployment tools use PowerShell and cmd heavily.
+  related: [4689, 4104, 1]
+  detection: EventID=4688 AND ParentProcessName IN (winword.exe, excel.exe, powerpnt.exe, outlook.exe) AND NewProcessName IN (cmd.exe, powershell.exe, wscript.exe, cscript.exe, mshta.exe, rundll32.exe) -> alert.
+
+- id: 4689
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: A process has exited
+  category: execution
+  criticality: info
+  description: >
+    A process ended. Audit policy - Detailed Tracking > Audit Process
+    Termination.
+  relevance: >
+    Combined with 4688 it gives process lifetime. Very short-lived processes
+    (launched and exited in under a second) are common with droppers and
+    one-shot discovery commands.
+  mitre: []
+  fields:
+    - name: ProcessName / ProcessId
+      note: Match against NewProcessName/NewProcessId in 4688.
+    - name: Status
+      note: Exit code.
+  investigate:
+    - Compute process duration by joining with 4688 on ProcessId and time.
+  false_positives:
+    - Normal, high volume.
+  related: [4688]
+
+- id: 4697
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: A service was installed in the system
+  category: persistence
+  criticality: high
+  description: >
+    A new service was installed. Security-log counterpart of System 7045.
+    Audit policy - System > Audit Security System Extension.
+  relevance: >
+    Services run as SYSTEM and start automatically, which makes them a
+    favourite for persistence and privilege escalation. PsExec, Cobalt
+    Strike, Impacket smbexec/psexec and many ransomware families install
+    services on remote hosts.
+  mitre: [T1543.003, T1569.002]
+  fields:
+    - name: ServiceName
+      note: Random-looking names (e.g. 8 random characters) are typical of Impacket/Metasploit/Cobalt Strike.
+    - name: ServiceFileName
+      note: Binary or command run by the service - cmd.exe /c, powershell, %COMSPEC%, \\127.0.0.1\ADMIN$ or paths in Temp are suspicious.
+    - name: ServiceStartType
+      note: 2 = auto start (persistence), 3 = demand start (often one-shot remote execution).
+    - name: ServiceAccount
+      note: Usually LocalSystem.
+  investigate:
+    - Inspect ServiceFileName for encoded PowerShell, cmd /c, or ADMIN$ paths.
+    - Check the SubjectLogonId / preceding 4624 type 3 to identify the remote host that installed it.
+    - Verify whether the service matches software deployed by IT.
+  false_positives:
+    - Software installations and driver updates.
+  related: [7045, 4624, 4688]
+
+- id: 4698
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: A scheduled task was created
+  category: persistence
+  criticality: medium
+  description: >
+    A scheduled task was registered. The full task XML is included in
+    TaskContent. Audit policy - Object Access > Audit Other Object Access
+    Events.
+  relevance: >
+    Scheduled tasks are one of the most common persistence and remote
+    execution mechanisms (schtasks /create /s, Impacket atexec). TaskContent
+    shows exactly what will run, as which user and when.
+  mitre: [T1053.005]
+  fields:
+    - name: TaskName
+      note: Tasks in the root folder or mimicking Microsoft names (e.g. \Microsoft\Windows\UpdateCheck) deserve scrutiny.
+    - name: TaskContent
+      note: XML with <Command>, <Arguments>, <Triggers> and <Principal> - look for powershell, cmd, rundll32, mshta or user-writable paths.
+    - name: SubjectUserName
+      note: Account that created the task.
+  investigate:
+    - Parse TaskContent and review the command and arguments.
+    - Check whether the task was created remotely (network logon from another host just before).
+    - Look for a matching TaskScheduler 106 and follow-on 200/201 executions.
+  false_positives:
+    - Software updaters (Google, Adobe, OneDrive) create tasks routinely.
+  related: [4699, 4700, 4701, 4702, 106, 200]
+
+- id: 4699
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: A scheduled task was deleted
+  category: defense-evasion
+  criticality: medium
+  description: >
+    A scheduled task was removed.
+  relevance: >
+    Attackers delete tasks after using them for one-shot remote execution
+    (e.g. Impacket atexec creates, runs and deletes a task within seconds) to
+    clean up traces.
+  mitre: [T1053.005, T1070]
+  fields:
+    - name: TaskName
+      note: Compare with recent 4698 events - create and delete within a minute is suspicious.
+  investigate:
+    - Find the matching 4698 to recover the TaskContent of the deleted task.
+  false_positives:
+    - Software uninstallers.
+  related: [4698, 141]
+
+- id: 4700
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: A scheduled task was enabled
+  category: persistence
+  criticality: low
+  description: >
+    A previously disabled scheduled task was enabled.
+  relevance: >
+    Re-enabling a disabled task can reactivate dormant persistence.
+  mitre: [T1053.005]
+  fields:
+    - name: TaskName / TaskContent
+      note: Task that was enabled and its definition.
+  investigate:
+    - Review the task definition and who enabled it.
+  false_positives:
+    - Administrative maintenance.
+  related: [4698, 4701]
+
+- id: 4701
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: A scheduled task was disabled
+  category: defense-evasion
+  criticality: medium
+  description: >
+    A scheduled task was disabled.
+  relevance: >
+    Attackers and ransomware disable security-related tasks (Windows Defender
+    scheduled scans, backup jobs, update tasks) to weaken defences.
+  mitre: [T1562.001]
+  fields:
+    - name: TaskName
+      note: Tasks under \Microsoft\Windows\Windows Defender\ or backup tasks are high interest.
+  investigate:
+    - Check whether a security, backup or update task was disabled and by which account.
+  false_positives:
+    - Admins disabling noisy tasks.
+  related: [4698, 4700]
+
+- id: 4702
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: A scheduled task was updated
+  category: persistence
+  criticality: medium
+  description: >
+    An existing scheduled task was modified. TaskContentNew contains the new
+    definition.
+  relevance: >
+    Hijacking an existing, trusted-looking task (changing its action to a
+    malicious command) is stealthier than creating a new one.
+  mitre: [T1053.005]
+  fields:
+    - name: TaskName
+      note: Task that was modified.
+    - name: TaskContentNew
+      note: New XML definition - diff it against the known-good version.
+  investigate:
+    - Compare the new action/arguments with the original task definition.
+  false_positives:
+    - Software updaters regularly update their own tasks (triggers, versions).
+  related: [4698]
+
+- id: 4719
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: System audit policy was changed
+  category: defense-evasion
+  criticality: high
+  description: >
+    The local audit policy was changed (e.g. via auditpol.exe or GPO).
+  relevance: >
+    Disabling audit subcategories blinds defenders - an attacker can turn off
+    logon or process-creation auditing before acting. Changes outside GPO
+    refreshes are suspicious.
+  mitre: [T1562.002]
+  fields:
+    - name: SubcategoryGuid / SubcategoryName
+      note: Which audit subcategory changed.
+    - name: AuditPolicyChanges
+      note: '"Success removed" / "Failure removed" indicates auditing was reduced.'
+    - name: SubjectUserName
+      note: SYSTEM usually means a GPO refresh; a user account means a manual change.
+  investigate:
+    - Look for auditpol.exe /set or /clear in process creation logs.
+    - Confirm whether a GPO change was made at the same time.
+  false_positives:
+    - Group Policy refreshes applying audit settings (SubjectUserName = computer account / SYSTEM).
+  related: [1102, 4688]
+
+- id: 4720
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: A user account was created
+  category: account-management
+  criticality: medium
+  description: >
+    A new user account was created, locally (SAM) or in Active Directory
+    (logged on the DC). Audit policy - Account Management > Audit User
+    Account Management.
+  relevance: >
+    Creating accounts is a simple persistence method (net user backdoor
+    P@ss /add). Accounts created outside the normal provisioning process or
+    by unexpected users warrant investigation.
+  mitre: [T1136.001, T1136.002]
+  fields:
+    - name: TargetUserName / TargetSid
+      note: New account.
+    - name: SubjectUserName
+      note: Who created it - compare with your identity-management service account.
+    - name: UserAccountControl
+      note: Flags such as 'Don't Require Preauth' or 'Password Not Required' are red flags.
+  investigate:
+    - Check whether the creator is an approved provisioning account and a ticket exists.
+    - Look for follow-on 4732/4728 adding the account to privileged groups.
+    - Check if the new account logged on (4624) shortly after creation.
+  false_positives:
+    - HR/IAM provisioning, helpdesk account creation.
+  related: [4722, 4726, 4728, 4732, 4738]
+  detection: EventID=4720 AND SubjectUserName NOT IN (approved provisioning accounts) -> alert; 4720 followed by 4732 (Administrators) within 1 hour -> high.
+
+- id: 4722
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: A user account was enabled
+  category: account-management
+  criticality: medium
+  description: >
+    A disabled user account was enabled. Also logged immediately after 4720
+    for newly created accounts.
+  relevance: >
+    Re-enabling dormant or disabled accounts (former employees, built-in
+    Guest/Administrator) gives attackers access that nobody is watching.
+  mitre: [T1098, T1078.001]
+  fields:
+    - name: TargetUserName
+      note: Enabled account - Guest or the built-in Administrator (RID 500) is very suspicious.
+    - name: SubjectUserName
+      note: Who enabled it.
+  investigate:
+    - Ignore when directly after a 4720 for the same account; otherwise verify with the account owner/manager.
+  false_positives:
+    - Returning employees, helpdesk actions.
+  related: [4720, 4725]
+
+- id: 4723
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: An attempt was made to change an account's password
+  category: account-management
+  criticality: low
+  description: >
+    A user tried to change their own password (knowing the old one).
+  relevance: >
+    Normally benign. Suspicious if it happens from an unusual host shortly
+    after a suspicious logon - an attacker locking the real user out.
+  mitre: [T1098]
+  fields:
+    - name: TargetUserName
+      note: Account whose password was changed.
+  investigate:
+    - Correlate with the logon session that made the change.
+  false_positives:
+    - Routine password changes and expiry-driven changes.
+  related: [4724, 4738]
+
+- id: 4724
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: An attempt was made to reset an account's password
+  category: account-management
+  criticality: medium
+  description: >
+    An account reset another account's password (without knowing the old
+    one). Requires reset-password rights on the target.
+  relevance: >
+    Attackers with helpdesk or admin rights reset passwords to take over
+    accounts, or abuse delegated ACLs (ForceChangePassword) found with
+    BloodHound.
+  mitre: [T1098]
+  fields:
+    - name: TargetUserName
+      note: Account whose password was reset.
+    - name: SubjectUserName
+      note: Account that performed the reset - should be helpdesk/IAM.
+  investigate:
+    - Verify a helpdesk ticket exists; resets of privileged accounts by non-admins are high priority.
+  false_positives:
+    - Helpdesk password resets.
+  related: [4723, 4738]
+
+- id: 4725
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: A user account was disabled
+  category: account-management
+  criticality: low
+  description: >
+    A user account was disabled.
+  relevance: >
+    Mass disabling of accounts (especially admins) can be an impact action
+    by attackers or ransomware operators to hinder response.
+  mitre: [T1531]
+  fields:
+    - name: TargetUserName / SubjectUserName
+      note: Disabled account and who did it.
+  investigate:
+    - Look for many accounts disabled in a short time or admin accounts being disabled.
+  false_positives:
+    - Offboarding processes.
+  related: [4722, 4726]
+
+- id: 4726
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: A user account was deleted
+  category: account-management
+  criticality: medium
+  description: >
+    A user account was deleted.
+  relevance: >
+    Attackers delete accounts they created to cover tracks, or delete
+    legitimate accounts as an impact action.
+  mitre: [T1531, T1070]
+  fields:
+    - name: TargetUserName / TargetSid
+      note: Deleted account.
+    - name: SubjectUserName
+      note: Who deleted it.
+  investigate:
+    - Look for a recent 4720 for the same account (create-use-delete pattern).
+  false_positives:
+    - Offboarding and account cleanup.
+  related: [4720, 4725]
+
+- id: 4728
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: A member was added to a security-enabled global group
+  category: account-management
+  criticality: high
+  description: >
+    An account was added to a domain global security group (e.g. Domain
+    Admins). Logged on domain controllers. Audit policy - Account Management
+    > Audit Security Group Management.
+  relevance: >
+    Adding a controlled account to Domain Admins or other privileged global
+    groups is a direct path to domain dominance.
+  mitre: [T1098]
+  fields:
+    - name: TargetUserName
+      note: The group - Domain Admins, Enterprise Admins, Schema Admins and similar are critical.
+    - name: MemberName / MemberSid
+      note: Account added.
+    - name: SubjectUserName
+      note: Who added it.
+  investigate:
+    - Alert on any change to privileged groups and confirm with the change process.
+  false_positives:
+    - Approved admin onboarding.
+  related: [4732, 4756, 4720]
+  detection: EventID IN (4728,4732,4756) AND TargetUserName IN (Domain Admins, Enterprise Admins, Schema Admins, Administrators, Backup Operators, Account Operators) -> alert (high).
+
+- id: 4732
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: A member was added to a security-enabled local group
+  category: account-management
+  criticality: high
+  description: >
+    An account was added to a local security group on a member server or
+    workstation, or to a domain-local group on a DC (e.g. Administrators,
+    Remote Desktop Users).
+  relevance: >
+    'net localgroup administrators user /add' is a textbook privilege
+    escalation and persistence step. Adding users to Remote Desktop Users
+    enables RDP access.
+  mitre: [T1098]
+  fields:
+    - name: TargetUserName
+      note: The group - Administrators and Remote Desktop Users are most sensitive.
+    - name: MemberSid / MemberName
+      note: Account added (MemberName is often '-' for local accounts - resolve the SID).
+    - name: SubjectUserName
+      note: Who performed the change.
+  investigate:
+    - Correlate with 4688 for net.exe/net1.exe localgroup commands.
+    - Check if the added account was created recently (4720).
+  false_positives:
+    - IT onboarding, LAPS/endpoint management tools.
+  related: [4728, 4756, 4720, 4799]
+
+- id: 4738
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: A user account was changed
+  category: account-management
+  criticality: medium
+  description: >
+    Attributes of a user account changed (UAC flags, password-last-set,
+    SPN, profile paths, etc.). Changed fields are shown, unchanged ones are '-'.
+  relevance: >
+    Watch for security-relevant UserAccountControl changes such as
+    'Don't Require Preauth' (enables AS-REP roasting), 'Password Not
+    Required', 'Password Never Expires' or reversible encryption - attackers
+    set these to weaken or backdoor accounts.
+  mitre: [T1098, T1558.004]
+  fields:
+    - name: UserAccountControl
+      note: "Look for %%2096 (Don't Require Preauth enabled), %%2082 (Password Not Required), %%2089 (Password Never Expires)."
+    - name: OldUacValue / NewUacValue
+      note: Hex UAC values before and after.
+    - name: SubjectUserName
+      note: Who changed the account.
+  investigate:
+    - Decode UAC changes and alert on preauth-disabled or password-not-required flags.
+    - Check for SPN additions on user accounts (targeted Kerberoasting).
+  false_positives:
+    - Password changes and routine HR attribute updates produce 4738 too.
+  related: [4720, 4724, 4768]
+
+- id: 4740
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: A user account was locked out
+  category: authentication
+  criticality: medium
+  description: >
+    An account was locked out after exceeding the bad-password threshold.
+    Logged on the DC holding the PDC Emulator role for domain accounts, or
+    locally for local accounts.
+  relevance: >
+    Lockouts are a side effect of brute-force attempts. CallerComputerName
+    points to the machine sending the bad passwords.
+  mitre: [T1110]
+  fields:
+    - name: TargetUserName
+      note: Locked-out account.
+    - name: CallerComputerName
+      note: Machine the failed attempts came from.
+  investigate:
+    - Pivot to the CallerComputerName and review 4625/4771/4776 events there.
+    - Many accounts locked out at once indicates spraying.
+  false_positives:
+    - Users with stale passwords on phones, mapped drives or services.
+  related: [4625, 4767, 4771]
+
+- id: 4756
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: A member was added to a security-enabled universal group
+  category: account-management
+  criticality: high
+  description: >
+    An account was added to a universal security group (e.g. Enterprise
+    Admins, Schema Admins in the forest root domain).
+  relevance: >
+    Universal groups often carry forest-wide privileges; unauthorized
+    additions indicate escalation toward forest compromise.
+  mitre: [T1098]
+  fields:
+    - name: TargetUserName
+      note: The group.
+    - name: MemberName
+      note: Account added.
+    - name: SubjectUserName
+      note: Who added it.
+  investigate:
+    - Treat changes to Enterprise Admins / Schema Admins as critical.
+  false_positives:
+    - Approved forest-level administration.
+  related: [4728, 4732]
+
+- id: 4767
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: A user account was unlocked
+  category: account-management
+  criticality: low
+  description: >
+    A locked-out account was unlocked by an administrator or helpdesk.
+  relevance: >
+    Provides context for lockout investigations - an unlock followed by more
+    failures means the source of bad passwords was not fixed.
+  mitre: []
+  fields:
+    - name: TargetUserName / SubjectUserName
+      note: Unlocked account and who unlocked it.
+  investigate:
+    - Correlate with 4740 and subsequent 4625s.
+  false_positives:
+    - Normal helpdesk activity.
+  related: [4740]
+
+- id: 4768
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: A Kerberos authentication ticket (TGT) was requested
+  category: authentication
+  criticality: low
+  description: >
+    A client requested a Ticket Granting Ticket (AS-REQ). Logged on domain
+    controllers. Audit policy - Account Logon > Audit Kerberos
+    Authentication Service.
+  relevance: >
+    Records domain logons. PreAuthType 0 means no pre-authentication was
+    required - the account is vulnerable to AS-REP roasting. RC4 (0x17)
+    tickets in an AES environment can point to downgrade or forged-ticket
+    tooling.
+  mitre: [T1558.004, T1078.002]
+  fields:
+    - name: TargetUserName
+      note: Account requesting the TGT.
+    - name: IpAddress
+      note: Client address.
+    - name: Status
+      note: "0x0 success; failures use Kerberos codes (0x6 unknown user, 0x12 revoked/disabled, 0x18 bad password). Use `weix status <code>`."
+    - name: TicketEncryptionType
+      note: 0x12 AES256, 0x11 AES128, 0x17 RC4-HMAC, 0x1/0x3 DES.
+    - name: PreAuthType
+      note: 0 = no pre-authentication (AS-REP roastable), 2 = encrypted timestamp (normal).
+  investigate:
+    - Alert on successful requests with PreAuthType 0 - identify and fix accounts with preauth disabled.
+    - Many 0x6 failures from one IP indicates username enumeration (e.g. kerbrute).
+  false_positives:
+    - Very high volume on DCs; legacy systems may still use RC4.
+  related: [4769, 4771, 4624, 4738]
+
+- id: 4769
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: A Kerberos service ticket was requested
+  category: credential-access
+  criticality: low
+  description: >
+    A client requested a service ticket (TGS-REQ) for an SPN. Logged on
+    domain controllers. Audit policy - Account Logon > Audit Kerberos Service
+    Ticket Operations.
+  relevance: >
+    Kerberoasting requests service tickets for accounts with SPNs, usually
+    with RC4 encryption (0x17), so the ticket can be cracked offline for the
+    service account's password. A single user requesting many service tickets
+    in a short time is a strong signal.
+  mitre: [T1558.003]
+  fields:
+    - name: ServiceName
+      note: Requested service account/SPN owner - user accounts (not ending in $) are Kerberoasting targets.
+    - name: TicketEncryptionType
+      note: 0x17 (RC4) is the classic Kerberoasting signal in modern AES environments.
+    - name: TargetUserName / IpAddress
+      note: Requesting user and client address.
+    - name: TicketOptions
+      note: 0x40810000 and 0x40800000 are commonly seen with Rubeus/Impacket requests.
+  investigate:
+    - Group by requesting account - many distinct ServiceName values with 0x17 in minutes suggests Kerberoasting.
+    - Rotate passwords for targeted service accounts; move them to gMSA or long random passwords.
+    - Consider a honey SPN account whose ticket requests always alert.
+  false_positives:
+    - Legacy applications that only support RC4.
+  related: [4768, 4624]
+  detection: EventID=4769 AND TicketEncryptionType=0x17 AND ServiceName NOT ending in '$' AND ServiceName != krbtgt -> suspicious; >= 5 distinct ServiceName per requester in 10 minutes -> alert.
+
+- id: 4771
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: Kerberos pre-authentication failed
+  category: authentication
+  criticality: medium
+  description: >
+    Kerberos pre-authentication failed on the DC - usually a wrong password.
+    Audit policy - Account Logon > Audit Kerberos Authentication Service
+    (Failure).
+  relevance: >
+    The Kerberos equivalent of 4625 on domain controllers. Password spraying
+    over Kerberos (e.g. kerbrute) shows up here rather than as 4625.
+  mitre: [T1110.001, T1110.003]
+  fields:
+    - name: TargetUserName
+      note: Account attempted.
+    - name: IpAddress
+      note: Source client.
+    - name: Status
+      note: "0x18 bad password, 0x12 disabled/locked/expired, 0x25 clock skew. Use `weix status <code>`."
+  investigate:
+    - Many accounts with 0x18 from one IpAddress -> password spraying.
+    - Check for a subsequent successful 4768 for the same accounts.
+  false_positives:
+    - Users mistyping passwords, cached old passwords on devices.
+  related: [4768, 4625, 4740]
+
+- id: 4776
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: The computer attempted to validate the credentials for an account
+  category: authentication
+  criticality: low
+  description: >
+    NTLM credential validation. Logged on the DC for domain accounts, or on
+    the local machine for local accounts. Audit policy - Account Logon >
+    Audit Credential Validation.
+  relevance: >
+    Shows NTLM authentication and its failures. NTLM brute force, spraying
+    and pass-the-hash all produce 4776. Workstation names that don't exist in
+    the domain are a hint of attacker tooling.
+  mitre: [T1110, T1550.002]
+  fields:
+    - name: TargetUserName
+      note: Account being validated.
+    - name: Workstation
+      note: Source workstation name reported by the client (can be spoofed).
+    - name: Status
+      note: "0x0 success, 0xC000006A bad password, 0xC0000064 unknown user. Use `weix status <code>`."
+  investigate:
+    - Look for failure bursts per Workstation / account.
+    - Investigate NTLM usage for privileged accounts that should use Kerberos only.
+  false_positives:
+    - Legacy applications relying on NTLM.
+  related: [4624, 4625]
+
+- id: 4778
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: A session was reconnected to a Window Station
+  category: lateral-movement
+  criticality: low
+  description: >
+    A user reconnected to an existing session - typically RDP reconnects or
+    fast user switching. Audit policy - Logon/Logoff > Audit Other
+    Logon/Logoff Events.
+  relevance: >
+    Includes the client name and IP of the reconnecting machine, which helps
+    track RDP usage where 4624 type 10 is not generated (reconnects).
+  mitre: [T1021.001]
+  fields:
+    - name: AccountName
+      note: User reconnecting.
+    - name: ClientName / ClientAddress
+      note: Remote client host name and IP.
+  investigate:
+    - Verify the ClientAddress is expected for the user.
+  false_positives:
+    - Normal RDP usage.
+  related: [4779, 4624, 25]
+
+- id: 4779
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: A session was disconnected from a Window Station
+  category: lateral-movement
+  criticality: info
+  description: >
+    A user disconnected from a session without logging off (e.g. closing the
+    RDP window).
+  relevance: >
+    Bounds RDP activity windows; attackers often disconnect rather than log
+    off, leaving the session available for later reconnection.
+  mitre: [T1021.001]
+  fields:
+    - name: AccountName / ClientName / ClientAddress
+      note: User and remote client.
+  investigate:
+    - Pair with 4778 to build RDP session timelines.
+  false_positives:
+    - Normal RDP usage.
+  related: [4778, 24]
+
+- id: 4798
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: A user's local group membership was enumerated
+  category: discovery
+  criticality: low
+  description: >
+    A process enumerated the local groups a user belongs to. Audit policy -
+    Account Management > Audit User Account Management.
+  relevance: >
+    Reconnaissance tools (net user, PowerView, BloodHound collectors) trigger
+    bursts of this event. The calling process is what matters.
+  mitre: [T1087.001, T1069.001]
+  fields:
+    - name: TargetUserName
+      note: User whose membership was enumerated.
+    - name: CallerProcessName
+      note: Process that performed the enumeration - net.exe, powershell.exe or unknown binaries are interesting.
+  investigate:
+    - Ignore common callers (explorer.exe, mmc.exe, svchost.exe) and review the rest.
+  false_positives:
+    - Windows itself and management tools enumerate groups frequently.
+  related: [4799]
+
+- id: 4799
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: A security-enabled local group membership was enumerated
+  category: discovery
+  criticality: low
+  description: >
+    A process enumerated the members of a local security group (e.g.
+    Administrators).
+  relevance: >
+    'net localgroup administrators' and similar discovery commands - often
+    among the first commands an attacker runs on a new host.
+  mitre: [T1069.001]
+  fields:
+    - name: TargetUserName
+      note: The group enumerated (Administrators, Remote Desktop Users).
+    - name: CallerProcessName
+      note: Process that performed the enumeration.
+  investigate:
+    - Look for net.exe/net1.exe/powershell.exe callers and correlate with 4688 discovery bursts.
+  false_positives:
+    - Legitimate management tools, some svchost-hosted services.
+  related: [4798, 4732]
+
+- id: 4964
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: Special groups have been assigned to a new logon
+  category: privilege-use
+  criticality: medium
+  description: >
+    A logon included a member of a group listed in the "Special Groups"
+    audit configuration (HKLM\System\CurrentControlSet\Control\Lsa\Audit\SpecialGroups).
+  relevance: >
+    A built-in way to get an alert-grade event whenever members of groups you
+    define (e.g. Domain Admins, Tier 0 admins) log on anywhere.
+  mitre: [T1078.002]
+  fields:
+    - name: TargetUserName / TargetLogonId
+      note: Account and session.
+    - name: SidList
+      note: The special group SIDs matched.
+  investigate:
+    - Tier 0 accounts logging on to workstations or member servers violates tiering - investigate.
+  false_positives:
+    - Legitimate admin logons to approved systems.
+  related: [4624, 4672]
+
+- id: 5136
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: A directory service object was modified
+  category: defense-evasion
+  criticality: medium
+  description: >
+    An attribute of an Active Directory object changed. Logged on DCs with
+    DS Access > Audit Directory Service Changes and a SACL.
+  relevance: >
+    Captures GPO modifications (malicious scheduled tasks or scripts pushed
+    domain-wide), AdminSDHolder ACL changes, msDS-AllowedToActOnBehalfOfOtherIdentity
+    changes (resource-based constrained delegation abuse) and SPN additions.
+  mitre: [T1484.001, T1098]
+  fields:
+    - name: ObjectDN
+      note: Object changed - CN=Policies (GPOs), CN=AdminSDHolder, privileged users/computers.
+    - name: AttributeLDAPDisplayName
+      note: Attribute changed (gPCFileSysPath, nTSecurityDescriptor, servicePrincipalName, msDS-AllowedToActOnBehalfOfOtherIdentity).
+    - name: OperationType
+      note: '%%14674 value added, %%14675 value deleted.'
+    - name: SubjectUserName
+      note: Who made the change.
+  investigate:
+    - Alert on AdminSDHolder and RBCD attribute changes.
+    - For GPO changes, review the GPO's SYSVOL content for new scripts or scheduled tasks.
+  false_positives:
+    - Routine AD administration generates many 5136s.
+  related: [4662, 4738]
+
+- id: 5140
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: A network share object was accessed
+  category: lateral-movement
+  criticality: low
+  description: >
+    A client connected to a network share (logged once per session per
+    share). Audit policy - Object Access > Audit File Share.
+  relevance: >
+    Access to admin shares (ADMIN$, C$, IPC$) from workstations is typical
+    of PsExec, Impacket and ransomware propagation.
+  mitre: [T1021.002]
+  fields:
+    - name: ShareName
+      note: \\*\ADMIN$ and \\*\C$ are the high-interest admin shares.
+    - name: IpAddress
+      note: Client address.
+    - name: SubjectUserName
+      note: Account used.
+  investigate:
+    - Review ADMIN$/C$ access from non-admin workstations.
+    - Correlate with a 7045/4697 service install shortly after (PsExec pattern).
+  false_positives:
+    - Software deployment and management tools (SCCM) use admin shares.
+  related: [5145, 4624, 7045]
+
+- id: 5145
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: A network share object was checked to see whether client can be granted desired access
+  category: lateral-movement
+  criticality: low
+  description: >
+    Detailed file-share auditing - logged for each file/pipe accessed on a
+    share, including the relative path. Audit policy - Object Access > Audit
+    Detailed File Share.
+  relevance: >
+    Shows exactly which files and named pipes were touched over SMB. Named
+    pipes such as svcctl, atsvc, winreg and samr on IPC$ reveal remote service
+    creation, scheduled-task creation and SAM enumeration.
+  mitre: [T1021.002, T1570]
+  fields:
+    - name: ShareName / RelativeTargetName
+      note: Share and file/pipe accessed (e.g. IPC$ + svcctl).
+    - name: AccessList
+      note: Requested access (WriteData on ADMIN$ = file dropped remotely).
+    - name: IpAddress
+      note: Client.
+  investigate:
+    - Look for executables written to ADMIN$ or C$\Windows\Temp followed by service creation.
+    - IPC$ access to svcctl/atsvc from workstations indicates remote execution.
+  false_positives:
+    - Very high volume on file servers - scope collection to sensitive servers.
+  related: [5140, 4663]
+
+- id: 5156
+  channel: Security
+  provider: Microsoft-Windows-Security-Auditing
+  name: The Windows Filtering Platform has permitted a connection
+  category: network
+  criticality: info
+  description: >
+    WFP allowed an inbound or outbound network connection. Audit policy -
+    Object Access > Audit Filtering Platform Connection. Very noisy.
+  relevance: >
+    Native network telemetry that ties connections to processes - useful to
+    spot unusual processes making outbound connections (C2) when Sysmon
+    Event 3 is not available.
+  mitre: [T1071]
+  fields:
+    - name: Application
+      note: Process path (in device path form).
+    - name: Direction
+      note: '%%14592 inbound, %%14593 outbound.'
+    - name: SourceAddress / DestAddress / DestPort
+      note: Connection tuple.
+  investigate:
+    - Look for scripting hosts or Office apps making outbound connections, or rare external destinations.
+  false_positives:
+    - Every allowed connection is logged - enable selectively.
+  related: [3]

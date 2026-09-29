@@ -1,0 +1,294 @@
+# Microsoft Defender, Remote Desktop, Task Scheduler and WMI.
+
+- id: 1116
+  channel: Microsoft-Windows-Windows Defender/Operational
+  provider: Microsoft-Windows-Windows Defender
+  name: The antimalware platform detected malware or other potentially unwanted software
+  category: malware
+  criticality: high
+  description: >
+    Microsoft Defender Antivirus detected a threat. Followed by 1117 (action
+    taken) or 1118/1119 (action failed).
+  relevance: >
+    A direct signal of malicious files or behaviour on the host. Threat names
+    such as HackTool:Win32/Mimikatz, Behavior:Win32/CobaltStrike or
+    Trojan:Win32/Meterpreter point to hands-on-keyboard intrusions rather
+    than commodity adware.
+  mitre: []
+  fields:
+    - name: Threat Name
+      note: Defender threat family - HackTool, Behavior and Exploit categories indicate active attackers.
+    - name: Path
+      note: File or process where the threat was found.
+    - name: Detection User / Process Name
+      note: User context and process involved.
+    - name: Severity Name
+      note: Low / Moderate / High / Severe.
+  investigate:
+    - Confirm remediation happened (1117) - if not (1118/1119), treat the host as actively infected.
+    - Review what created the file and whether it executed before detection.
+    - Search for the same hash/threat name across the fleet.
+  false_positives:
+    - Penetration testing and admin tools flagged as HackTool/PUA.
+  related: [1117, 5001, 5007]
+
+- id: 1117
+  channel: Microsoft-Windows-Windows Defender/Operational
+  provider: Microsoft-Windows-Windows Defender
+  name: The antimalware platform performed an action to protect your system
+  category: malware
+  criticality: medium
+  description: >
+    Defender took action on a detected threat (quarantine, remove, block).
+  relevance: >
+    Confirms remediation of a 1116 detection. Repeated detection/remediation
+    cycles for the same threat suggest persistence re-dropping the payload.
+  mitre: []
+  fields:
+    - name: Threat Name / Path
+      note: Threat and location.
+    - name: Action Name
+      note: Quarantine, Remove, Block, etc.
+  investigate:
+    - Look for the same threat recurring - find the persistence mechanism re-creating it.
+  false_positives:
+    - Same as 1116.
+  related: [1116]
+
+- id: 5001
+  channel: Microsoft-Windows-Windows Defender/Operational
+  provider: Microsoft-Windows-Windows Defender
+  name: Real-time protection is disabled
+  category: defense-evasion
+  criticality: high
+  description: >
+    Defender real-time protection was turned off.
+  relevance: >
+    Attackers disable real-time protection (Set-MpPreference
+    -DisableRealtimeMonitoring $true, registry policies, or tampering tools)
+    before dropping tools like Mimikatz or ransomware.
+  mitre: [T1562.001]
+  fields:
+    - name: TimeCreated
+      note: When protection was disabled - look for tool drops immediately after.
+  investigate:
+    - Correlate with 4104/4688 for Set-MpPreference or registry changes under Windows Defender policies.
+    - Check whether Tamper Protection is enabled fleet-wide.
+  false_positives:
+    - Troubleshooting by IT, third-party AV installation.
+  related: [5007, 1116, 13]
+
+- id: 5007
+  channel: Microsoft-Windows-Windows Defender/Operational
+  provider: Microsoft-Windows-Windows Defender
+  name: The antimalware platform configuration changed
+  category: defense-evasion
+  criticality: medium
+  description: >
+    A Defender setting changed. Old Value / New Value show the registry path
+    and data.
+  relevance: >
+    Catches exclusions being added (Exclusions\Paths, Exclusions\Processes,
+    Exclusions\Extensions) - a stealthier alternative to disabling Defender
+    entirely.
+  mitre: [T1562.001]
+  fields:
+    - name: Old Value / New Value
+      note: Look for new entries under Exclusions\Paths (e.g. C:\Users\Public, C:\ProgramData).
+  investigate:
+    - Alert on new exclusion entries and identify who added them (4104 Add-MpPreference, Sysmon 13).
+  false_positives:
+    - Signature updates and policy pushes from management tools.
+  related: [5001, 1116]
+
+- id: 1149
+  channel: Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational
+  provider: Microsoft-Windows-TerminalServices-RemoteConnectionManager
+  name: 'Remote Desktop Services: User authentication succeeded'
+  category: lateral-movement
+  criticality: low
+  description: >
+    An RDP client connected and passed network-level authentication. Despite
+    its name it records a successful network connection/NLA, not necessarily
+    a completed interactive logon - confirm with LocalSessionManager 21/25
+    and Security 4624 type 10.
+  relevance: >
+    Records the source IP of incoming RDP connections even when Security log
+    events have been cleared or rolled over. Useful to find RDP entry points
+    and lateral movement.
+  mitre: [T1021.001]
+  fields:
+    - name: Param1 / Param2
+      note: User name and domain.
+    - name: Param3
+      note: Source IP address.
+  investigate:
+    - Check source IPs against expected admin workstations/VPN ranges; internet IPs indicate exposed RDP.
+    - Confirm the session with 21/25 and 4624 type 10.
+  false_positives:
+    - Normal RDP administration.
+  related: [21, 25, 4624, 4778]
+
+- id: 21
+  channel: Microsoft-Windows-TerminalServices-LocalSessionManager/Operational
+  provider: Microsoft-Windows-TerminalServices-LocalSessionManager
+  name: 'Remote Desktop Services: Session logon succeeded'
+  category: lateral-movement
+  criticality: low
+  description: >
+    A user session was created (console or RDP). For RDP, Source Network
+    Address holds the client IP; LOCAL means the console.
+  relevance: >
+    Confirms an interactive RDP logon with user and source IP; retained in
+    a separate log so it often survives Security log clearing.
+  mitre: [T1021.001]
+  fields:
+    - name: User
+      note: DOMAIN\user.
+    - name: Session ID
+      note: Session number - correlate with 24/25.
+    - name: Source Network Address
+      note: Client IP, or LOCAL for console logons.
+  investigate:
+    - Build RDP timelines per user with 21 -> 24/25 -> 23 (logoff).
+  false_positives:
+    - Normal RDP usage.
+  related: [1149, 24, 25, 4624]
+
+- id: 24
+  channel: Microsoft-Windows-TerminalServices-LocalSessionManager/Operational
+  provider: Microsoft-Windows-TerminalServices-LocalSessionManager
+  name: 'Remote Desktop Services: Session has been disconnected'
+  category: lateral-movement
+  criticality: info
+  description: >
+    An RDP session was disconnected (not logged off).
+  relevance: >
+    Shows when an RDP operator stepped away; disconnected sessions can be
+    hijacked (tscon) by an attacker with SYSTEM privileges.
+  mitre: [T1021.001, T1563.002]
+  fields:
+    - name: User / Session ID / Source Network Address
+      note: Session details.
+  investigate:
+    - Pair with 25 reconnects; reconnects from a different IP than the original logon may indicate hijacking.
+  false_positives:
+    - Normal RDP usage.
+  related: [21, 25, 4779]
+
+- id: 25
+  channel: Microsoft-Windows-TerminalServices-LocalSessionManager/Operational
+  provider: Microsoft-Windows-TerminalServices-LocalSessionManager
+  name: 'Remote Desktop Services: Session reconnection succeeded'
+  category: lateral-movement
+  criticality: low
+  description: >
+    A user reconnected to an existing disconnected session.
+  relevance: >
+    Reconnects do not generate a new 4624 type 10 (they generate type 7 or
+    4778), so 25 is needed to see the full picture of RDP access.
+  mitre: [T1021.001, T1563.002]
+  fields:
+    - name: User / Session ID / Source Network Address
+      note: Session details - compare Source Network Address with the original 21.
+  investigate:
+    - Investigate reconnects from unexpected IPs or by a different user than the session owner.
+  false_positives:
+    - Normal RDP usage.
+  related: [21, 24, 4778]
+
+- id: 106
+  channel: Microsoft-Windows-TaskScheduler/Operational
+  provider: Microsoft-Windows-TaskScheduler
+  name: Task registered
+  category: persistence
+  criticality: medium
+  description: >
+    A user registered a scheduled task. The TaskScheduler Operational log is
+    disabled by default on some Windows versions and may need enabling.
+  relevance: >
+    An alternative source for task creation when Security 4698 is not
+    audited. Pair with 200/201 to see that the task actually executed.
+  mitre: [T1053.005]
+  fields:
+    - name: TaskName
+      note: Registered task path.
+    - name: UserContext
+      note: User that registered it.
+  investigate:
+    - Export the task (schtasks /query /tn <name> /xml) and review its actions.
+  false_positives:
+    - Software installers and updaters.
+  related: [4698, 200, 141]
+
+- id: 200
+  channel: Microsoft-Windows-TaskScheduler/Operational
+  provider: Microsoft-Windows-TaskScheduler
+  name: Action started
+  category: execution
+  criticality: low
+  description: >
+    The Task Scheduler launched a task action.
+  relevance: >
+    Proves a scheduled task ran and which executable it started - key for
+    confirming persistence or remote execution via tasks.
+  mitre: [T1053.005]
+  fields:
+    - name: TaskName
+      note: Task that ran.
+    - name: ActionName
+      note: Executable launched (e.g. C:\Windows\System32\cmd.exe).
+    - name: TaskInstanceId
+      note: Correlates with 201 (action completed).
+  investigate:
+    - Check ActionName against the expected binary for that task.
+  false_positives:
+    - Normal scheduled activity.
+  related: [106, 4698]
+
+- id: 141
+  channel: Microsoft-Windows-TaskScheduler/Operational
+  provider: Microsoft-Windows-TaskScheduler
+  name: Task registration deleted
+  category: defense-evasion
+  criticality: medium
+  description: >
+    A user deleted a scheduled task.
+  relevance: >
+    Task deletion shortly after creation and execution is the hallmark of
+    one-shot remote execution tools (Impacket atexec) cleaning up.
+  mitre: [T1070, T1053.005]
+  fields:
+    - name: TaskName / UserName
+      note: Deleted task and who deleted it.
+  investigate:
+    - Look for 106 -> 200 -> 141 sequences within seconds for the same TaskName.
+  false_positives:
+    - Software uninstallers.
+  related: [106, 4699]
+
+- id: 5861
+  channel: Microsoft-Windows-WMI-Activity/Operational
+  provider: Microsoft-Windows-WMI-Activity
+  name: WMI permanent event subscription registered
+  category: persistence
+  criticality: high
+  description: >
+    A permanent WMI event consumer was bound to an event filter. Logged in
+    the WMI-Activity Operational log (Windows 10 / Server 2016+).
+  relevance: >
+    WMI event subscriptions are a stealthy, fileless persistence mechanism
+    used by APT groups and malware (e.g. CommandLineEventConsumer or
+    ActiveScriptEventConsumer that runs a payload at boot or on an interval).
+  mitre: [T1546.003]
+  fields:
+    - name: Namespace
+      note: Usually //./root/subscription.
+    - name: ESS / CONSUMER / PossibleCause
+      note: Filter query and consumer definition - CommandLineEventConsumer and ActiveScriptEventConsumer are the dangerous types.
+  investigate:
+    - Enumerate subscriptions (Get-WMIObject -Namespace root\subscription -Class __EventConsumer) and review the command/script.
+    - Correlate with Sysmon 19/20/21 if collected.
+  false_positives:
+    - Some management and monitoring software (SCCM, Dell/HP tools) register subscriptions.
+  related: [4688, 1]

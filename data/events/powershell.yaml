@@ -1,0 +1,119 @@
+# PowerShell logging.
+# 4103/4104 -> Microsoft-Windows-PowerShell/Operational (PowerShell 5+).
+# 400/800   -> "Windows PowerShell" classic log.
+
+- id: 4104
+  channel: Microsoft-Windows-PowerShell/Operational
+  provider: Microsoft-Windows-PowerShell
+  name: Script block logging (Creating Scriptblock text)
+  category: execution
+  criticality: medium
+  description: >
+    Records the full text of PowerShell script blocks as they are compiled,
+    after de-obfuscation layers such as -EncodedCommand are removed. Enabled by
+    the "Turn on PowerShell Script Block Logging" policy; even without it,
+    PowerShell 5+ logs script blocks it considers suspicious at Warning level.
+    Large scripts are split over multiple events (MessageNumber/MessageTotal).
+  relevance: >
+    The single best source for PowerShell attack visibility - shows decoded
+    payloads, download cradles, AMSI bypasses, Mimikatz/PowerView functions
+    and obfuscation, regardless of how the command was launched.
+  mitre: [T1059.001, T1027]
+  fields:
+    - name: ScriptBlockText
+      note: The script content - search for IEX, DownloadString, Net.WebClient, FromBase64String, Invoke-Mimikatz, AmsiUtils, Reflection.Assembly.
+    - name: ScriptBlockId
+      note: Groups the fragments of one large script.
+    - name: MessageNumber / MessageTotal
+      note: Fragment index for scripts split across events.
+    - name: Path
+      note: Script file path, empty for interactive/encoded commands.
+    - name: Level
+      note: Warning (3) = PowerShell itself flagged the block as suspicious.
+  investigate:
+    - Reassemble multi-part blocks by ScriptBlockId before analysis.
+    - Review Warning-level 4104s first - they matched PowerShell's built-in suspicious-content list.
+    - Extract URLs/IPs from download cradles and check them against threat intel.
+    - Correlate the process with 4688/Sysmon 1 to find the parent (Office, wmiprvse, services).
+  false_positives:
+    - Admin and management scripts (SCCM, Intune, monitoring agents) generate large volumes.
+  related: [4103, 4688, 400, 1]
+  detection: "EventID=4104 AND ScriptBlockText matches (IEX|Invoke-Expression).*(DownloadString|DownloadData|Net.WebClient) OR contains 'AmsiUtils' OR 'FromBase64String' with 'Reflection.Assembly' -> alert."
+
+- id: 4103
+  channel: Microsoft-Windows-PowerShell/Operational
+  provider: Microsoft-Windows-PowerShell
+  name: Module logging (Executing Pipeline)
+  category: execution
+  criticality: low
+  description: >
+    Records pipeline execution details - each cmdlet invoked and its
+    parameters. Enabled by the "Turn on Module Logging" policy.
+  relevance: >
+    Complements 4104 by showing cmdlet invocations with parameter values,
+    including those resolved at runtime (variables, obfuscated strings).
+  mitre: [T1059.001]
+  fields:
+    - name: Payload
+      note: CommandInvocation(...) and ParameterBinding(...) lines showing what ran.
+    - name: ContextInfo
+      note: Host application, user, script name, command line.
+  investigate:
+    - Look for Invoke-WebRequest, Start-BitsTransfer, New-Object Net.WebClient, Add-MpPreference -ExclusionPath.
+  false_positives:
+    - Legitimate automation.
+  related: [4104, 800]
+
+- id: 400
+  channel: Windows PowerShell
+  provider: PowerShell
+  name: Engine state is changed from None to Available
+  category: execution
+  criticality: low
+  description: >
+    A PowerShell engine (host) started. Logged by default in the classic
+    "Windows PowerShell" log, even when script block logging is off.
+  relevance: >
+    HostApplication contains the full command line that started PowerShell.
+    EngineVersion 2.0 indicates a downgrade attack - PowerShell v2 bypasses
+    script block logging and AMSI.
+  mitre: [T1059.001, T1562.010]
+  fields:
+    - name: HostApplication
+      note: Full command line (e.g. powershell.exe -nop -w hidden -enc ...).
+    - name: EngineVersion
+      note: '2.0 = downgrade attack (powershell -version 2).'
+    - name: HostName
+      note: ConsoleHost, ServerRemoteHost (PS remoting), or a custom host (e.g. from an unmanaged runspace).
+  investigate:
+    - Alert on EngineVersion 2.0 on systems that have PowerShell 5+.
+    - Decode -enc payloads in HostApplication.
+    - ServerRemoteHost indicates incoming PowerShell remoting (WinRM).
+  false_positives:
+    - Legacy scripts that explicitly require PowerShell v2.
+  related: [800, 4104]
+  detection: EventID=400 AND EngineVersion starts with '2.' -> alert (PowerShell downgrade).
+
+- id: 800
+  channel: Windows PowerShell
+  provider: PowerShell
+  name: Pipeline execution details
+  category: execution
+  criticality: low
+  description: >
+    Pipeline execution details in the classic log - the legacy counterpart of
+    4103, produced when module logging is enabled.
+  relevance: >
+    Can capture activity in older PowerShell versions or hosts where the
+    Operational channel is not collected.
+  mitre: [T1059.001]
+  fields:
+    - name: HostApplication
+      note: Command line of the host process.
+    - name: Details
+      note: CommandInvocation and ParameterBinding details.
+  investigate:
+    - Use when 4103/4104 are missing (e.g. downgrade to v2).
+  false_positives:
+    - Legitimate automation.
+  related: [400, 4103]

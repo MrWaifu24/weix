@@ -1,0 +1,183 @@
+# Failure codes seen in authentication events.
+# kind: ntstatus -> 4625 Status/SubStatus, 4776 Status
+# kind: kerberos -> 4768 / 4769 / 4771 Status (Failure Code)
+
+- code: "0xC0000064"
+  kind: ntstatus
+  name: STATUS_NO_SUCH_USER
+  meaning: User name does not exist.
+  notes: Many of these across different names from one source = username enumeration or spraying with a guessed user list.
+
+- code: "0xC000006A"
+  kind: ntstatus
+  name: STATUS_WRONG_PASSWORD
+  meaning: User name is correct but the password is wrong.
+  notes: The attacker knows a valid account name. Bursts indicate brute force.
+
+- code: "0xC000006D"
+  kind: ntstatus
+  name: STATUS_LOGON_FAILURE
+  meaning: Generic logon failure (bad user name or authentication information).
+  notes: Usually appears in Status - check SubStatus for the specific reason.
+
+- code: "0xC000006E"
+  kind: ntstatus
+  name: STATUS_ACCOUNT_RESTRICTION
+  meaning: Account restriction prevented logon (e.g. blank password not allowed, logon hours).
+  notes: Check SubStatus for detail.
+
+- code: "0xC000006F"
+  kind: ntstatus
+  name: STATUS_INVALID_LOGON_HOURS
+  meaning: Logon attempted outside authorized hours.
+  notes: Attempts at unusual hours can be attacker activity.
+
+- code: "0xC0000070"
+  kind: ntstatus
+  name: STATUS_INVALID_WORKSTATION
+  meaning: Logon from an unauthorized workstation.
+  notes: Account restricted to specific workstations (userWorkstations attribute).
+
+- code: "0xC0000071"
+  kind: ntstatus
+  name: STATUS_PASSWORD_EXPIRED
+  meaning: Password has expired.
+  notes: Usually benign.
+
+- code: "0xC0000072"
+  kind: ntstatus
+  name: STATUS_ACCOUNT_DISABLED
+  meaning: Account is disabled.
+  notes: Attempts against disabled accounts (e.g. ex-employees) can indicate use of old leaked credentials.
+
+- code: "0xC00000DC"
+  kind: ntstatus
+  name: STATUS_INVALID_SERVER_STATE
+  meaning: The SAM server was in the wrong state to perform the operation.
+  notes: Operational issue.
+
+- code: "0xC0000133"
+  kind: ntstatus
+  name: STATUS_TIME_DIFFERENCE_AT_DC
+  meaning: Clock skew between the machine and the domain controller is too large.
+  notes: Operational issue (time sync).
+
+- code: "0xC000015B"
+  kind: ntstatus
+  name: STATUS_LOGON_TYPE_NOT_GRANTED
+  meaning: User has not been granted the requested logon type on this machine.
+  notes: E.g. a user trying to RDP without 'Allow log on through Remote Desktop Services'.
+
+- code: "0xC000018C"
+  kind: ntstatus
+  name: STATUS_TRUSTED_DOMAIN_FAILURE
+  meaning: Trust relationship between the primary domain and the trusted domain failed.
+  notes: Operational issue.
+
+- code: "0xC0000192"
+  kind: ntstatus
+  name: STATUS_NETLOGON_NOT_STARTED
+  meaning: The Netlogon service was not started.
+  notes: Operational issue.
+
+- code: "0xC0000193"
+  kind: ntstatus
+  name: STATUS_ACCOUNT_EXPIRED
+  meaning: Account has expired.
+  notes: Attempts on expired accounts can indicate old credentials in use.
+
+- code: "0xC0000224"
+  kind: ntstatus
+  name: STATUS_PASSWORD_MUST_CHANGE
+  meaning: User must change password at next logon.
+  notes: Usually benign.
+
+- code: "0xC0000225"
+  kind: ntstatus
+  name: STATUS_NOT_FOUND
+  meaning: A Windows bug, not a security risk.
+  notes: Documented by Microsoft as benign.
+
+- code: "0xC0000234"
+  kind: ntstatus
+  name: STATUS_ACCOUNT_LOCKED_OUT
+  meaning: Account is locked out.
+  notes: Continued attempts after lockout suggest automated tooling. See 4740 for the lockout source.
+
+- code: "0xC00002EE"
+  kind: ntstatus
+  name: STATUS_UNFINISHED_CONTEXT_DELETED
+  meaning: An error occurred during logon.
+  notes: Often seen with interrupted or malformed authentication attempts.
+
+- code: "0xC0000371"
+  kind: ntstatus
+  name: STATUS_NO_SECRETS
+  meaning: The local account store does not contain secret material for the specified account.
+  notes: Seen with some RODC and cached-credential scenarios.
+
+- code: "0xC0000413"
+  kind: ntstatus
+  name: STATUS_AUTHENTICATION_FIREWALL_FAILED
+  meaning: The machine is not allowed to authenticate (selective authentication across a trust).
+  notes: Cross-trust access attempt blocked.
+
+- code: "0x6"
+  kind: kerberos
+  name: KDC_ERR_C_PRINCIPAL_UNKNOWN
+  meaning: Client not found in the Kerberos database (user does not exist).
+  notes: Bursts from one IP = Kerberos username enumeration (e.g. kerbrute userenum).
+
+- code: "0x7"
+  kind: kerberos
+  name: KDC_ERR_S_PRINCIPAL_UNKNOWN
+  meaning: Server (SPN) not found in the Kerberos database.
+  notes: Often misconfiguration; many different SPNs can indicate SPN scanning.
+
+- code: "0xC"
+  kind: kerberos
+  name: KDC_ERR_POLICY
+  meaning: KDC policy rejects the request (e.g. workstation or logon-hour restrictions).
+  notes: Check workstation and logon-hour restrictions.
+
+- code: "0xE"
+  kind: kerberos
+  name: KDC_ERR_ETYPE_NOTSUPP
+  meaning: KDC has no support for the requested encryption type.
+  notes: Can indicate tooling requesting weak (DES/RC4) encryption where it is disabled.
+
+- code: "0x12"
+  kind: kerberos
+  name: KDC_ERR_CLIENT_REVOKED
+  meaning: Client credentials have been revoked - account disabled, expired or locked out.
+  notes: Attempts against locked-out accounts during spraying show up here.
+
+- code: "0x17"
+  kind: kerberos
+  name: KDC_ERR_KEY_EXPIRED
+  meaning: Password has expired.
+  notes: "Not to be confused with encryption type 0x17 (RC4-HMAC) in the TicketEncryptionType field."
+
+- code: "0x18"
+  kind: kerberos
+  name: KDC_ERR_PREAUTH_FAILED
+  meaning: Pre-authentication failed - wrong password.
+  notes: The Kerberos equivalent of 0xC000006A. Many accounts from one IP = password spraying.
+
+- code: "0x1F"
+  kind: kerberos
+  name: KRB_AP_ERR_BAD_INTEGRITY
+  meaning: Integrity check on decrypted field failed.
+  notes: Can indicate tampered or forged tickets.
+
+- code: "0x20"
+  kind: kerberos
+  name: KRB_AP_ERR_TKT_EXPIRED
+  meaning: The ticket has expired.
+  notes: Normal - clients renew tickets.
+
+- code: "0x25"
+  kind: kerberos
+  name: KRB_AP_ERR_SKEW
+  meaning: Clock skew too great between client and KDC.
+  notes: Operational issue (time sync).

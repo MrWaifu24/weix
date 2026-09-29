@@ -1,0 +1,178 @@
+# System log events.
+
+- id: 7045
+  channel: System
+  provider: Service Control Manager
+  name: A service was installed in the system
+  category: persistence
+  criticality: high
+  description: >
+    A new service was registered with the Service Control Manager. Always
+    logged - no audit policy required - which makes it more reliable than
+    Security 4697.
+  relevance: >
+    One of the highest-value events for detecting remote execution and
+    persistence. PsExec (PSEXESVC), Impacket psexec/smbexec, Metasploit and
+    Cobalt Strike jump psexec all create services, often with random names
+    and cmd/powershell command lines.
+  mitre: [T1543.003, T1569.002]
+  fields:
+    - name: ServiceName
+      note: Random 4-16 character names or names imitating real services are suspicious.
+    - name: ImagePath
+      note: "Command executed - watch for cmd.exe /c, %COMSPEC%, powershell -enc, \\\\127.0.0.1\\ADMIN$, or binaries in Temp/ProgramData."
+    - name: ServiceType
+      note: '"kernel mode driver" installs can indicate rootkits or BYOVD (vulnerable driver) attacks.'
+    - name: StartType
+      note: '"auto start" = persistence; "demand start" = often one-shot remote execution.'
+    - name: AccountName
+      note: Account the service runs as - usually LocalSystem.
+  investigate:
+    - Decode any base64 in ImagePath and review what it runs.
+    - Look for a network logon (4624 type 3) and ADMIN$ access (5140/5145) just before - identifies the source host.
+    - Check if the service was deleted soon after (one-shot execution pattern).
+    - For drivers, check the driver hash against known vulnerable driver lists (loldrivers.io).
+  false_positives:
+    - Software and driver installations, updates, EDR/AV agents.
+  related: [4697, 7036, 7040, 5140, 4624]
+  detection: "EventID=7045 AND (ImagePath contains 'cmd.exe /c' OR '%COMSPEC%' OR 'powershell' OR '\\ADMIN$' OR ServiceName matches '^[A-Za-z0-9]{8}$') -> alert (high)."
+
+- id: 7036
+  channel: System
+  provider: Service Control Manager
+  name: The service entered the running/stopped state
+  category: system
+  criticality: info
+  description: >
+    A service changed state (started or stopped). Always logged.
+  relevance: >
+    Shows security services being stopped (Windows Defender, EDR agents,
+    backup services, Volume Shadow Copy) - a common pre-ransomware step - and
+    confirms that a newly installed malicious service actually ran.
+  mitre: [T1489, T1562.001]
+  fields:
+    - name: param1
+      note: Service display name.
+    - name: param2
+      note: New state (running / stopped).
+  investigate:
+    - Look for security, backup or database services stopping outside maintenance windows.
+    - Correlate with sc.exe stop / net stop / taskkill in process creation logs.
+  false_positives:
+    - Very common; services start and stop constantly.
+  related: [7045, 7040]
+
+- id: 7040
+  channel: System
+  provider: Service Control Manager
+  name: The start type of a service was changed
+  category: defense-evasion
+  criticality: medium
+  description: >
+    A service's start type changed (e.g. auto start to disabled).
+  relevance: >
+    Attackers disable security services (Defender, EDR, Windows Update,
+    event logging) or switch a malicious service to auto start for
+    persistence.
+  mitre: [T1562.001, T1543.003]
+  fields:
+    - name: param1
+      note: Service name.
+    - name: param2 / param3
+      note: Old and new start type.
+  investigate:
+    - Alert when security-related services are set to disabled.
+  false_positives:
+    - Windows Update and BITS routinely toggle between auto and demand start - filter those.
+  related: [7036, 7045]
+
+- id: 104
+  channel: System
+  provider: Microsoft-Windows-Eventlog
+  name: The event log was cleared
+  category: log-tampering
+  criticality: high
+  description: >
+    An event log other than Security (System, Application, PowerShell,
+    Sysmon, etc.) was cleared. The Channel field names the cleared log.
+  relevance: >
+    Attackers clear the System, PowerShell and Sysmon logs to remove
+    evidence of service installs, script execution and process activity.
+    'wevtutil cl' loops across all logs produce a burst of 104 events.
+  mitre: [T1070.001]
+  fields:
+    - name: Channel
+      note: Log that was cleared.
+    - name: SubjectUserName
+      note: Account that cleared it.
+  investigate:
+    - Pair with 1102 and look for wevtutil.exe cl or Clear-EventLog in process logs.
+    - Recover the cleared events from your SIEM or log forwarder.
+  false_positives:
+    - Troubleshooting or imaging activity.
+  related: [1102]
+
+- id: 6005
+  channel: System
+  provider: EventLog
+  name: The Event log service was started
+  category: system
+  criticality: info
+  description: >
+    The Event Log service started - effectively marks system boot.
+  relevance: >
+    Establishes reboot times. Unexpected reboots during an incident can
+    indicate driver installs, ransomware (some families reboot into Safe
+    Mode) or attempts to clear memory-resident evidence.
+  mitre: []
+  fields:
+    - name: TimeCreated
+      note: Boot time.
+  investigate:
+    - Build an uptime timeline with 6005/6006/6008 and compare to suspicious activity.
+  false_positives:
+    - Normal reboots and patch cycles.
+  related: [6006, 6008]
+
+- id: 6006
+  channel: System
+  provider: EventLog
+  name: The Event log service was stopped
+  category: system
+  criticality: info
+  description: >
+    The Event Log service stopped - marks a clean shutdown.
+  relevance: >
+    Together with 6005, brackets periods when the system was down and no
+    logs were recorded.
+  mitre: []
+  fields:
+    - name: TimeCreated
+      note: Shutdown time.
+  investigate:
+    - Check who initiated the shutdown (System 1074 records the process and user).
+  false_positives:
+    - Normal shutdowns.
+  related: [6005, 6008]
+
+- id: 6008
+  channel: System
+  provider: EventLog
+  name: The previous system shutdown was unexpected
+  category: system
+  criticality: low
+  description: >
+    Logged at boot when the previous shutdown was not clean (crash, power
+    loss, forced power-off).
+  relevance: >
+    Unexpected shutdowns can result from BSODs caused by malicious or
+    vulnerable drivers, or from an attacker forcing a reboot.
+  mitre: [T1529]
+  fields:
+    - name: param1 / param2
+      note: Time and date of the unexpected shutdown.
+  investigate:
+    - Check for crash dumps and recently installed drivers (7045 kernel mode driver).
+  false_positives:
+    - Power outages and hardware faults.
+  related: [6005, 6006]

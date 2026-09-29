@@ -1,0 +1,65 @@
+# Logon types used in 4624 / 4625 / 4634.
+
+- type: 0
+  name: System
+  description: Used only by the SYSTEM account, typically at startup.
+  notes: Rarely seen outside boot.
+
+- type: 2
+  name: Interactive
+  description: Logon at the physical console (keyboard, KVM, or some remote-control tools).
+  notes: Credentials are cached in LSASS memory and exposed to credential dumping on this host.
+
+- type: 3
+  name: Network
+  description: Access over the network - SMB shares, PsExec, WinRM, WMI, net use, most remote admin tools.
+  notes: >
+    The most common type in lateral movement. Credentials are generally not
+    left on the target. Workstation-to-workstation type 3 logons are unusual.
+
+- type: 4
+  name: Batch
+  description: Scheduled tasks running as a user.
+  notes: New type 4 logons for unexpected accounts can indicate malicious scheduled tasks.
+
+- type: 5
+  name: Service
+  description: A service started under a user or service account.
+  notes: A new account appearing with type 5 can indicate a malicious service.
+
+- type: 7
+  name: Unlock
+  description: Workstation unlock (and RDP reconnects on some versions).
+  notes: Usually benign.
+
+- type: 8
+  name: NetworkCleartext
+  description: Network logon where the password was sent in cleartext (IIS Basic auth, PowerShell with CredSSP in some cases).
+  notes: Cleartext credentials crossing the network - investigate the application.
+
+- type: 9
+  name: NewCredentials
+  description: runas /netonly - local identity unchanged, new credentials used for outbound network connections.
+  notes: >
+    With LogonProcessName 'seclogo' this is a known pass-the-hash indicator
+    (e.g. Mimikatz sekurlsa::pth creates type 9 logons).
+
+- type: 10
+  name: RemoteInteractive
+  description: Remote Desktop (RDP), Terminal Services or Remote Assistance.
+  notes: Credentials are cached on the target. Check the source IP against expected admin hosts.
+
+- type: 11
+  name: CachedInteractive
+  description: Interactive logon using cached domain credentials (no DC reachable, e.g. laptop offline).
+  notes: Common for laptops; unusual for servers.
+
+- type: 12
+  name: CachedRemoteInteractive
+  description: RDP logon using cached credentials (also used for Microsoft accounts).
+  notes: Same considerations as type 10.
+
+- type: 13
+  name: CachedUnlock
+  description: Workstation unlock using cached credentials.
+  notes: Usually benign.

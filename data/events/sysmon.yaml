@@ -1,0 +1,252 @@
+# Sysinternals Sysmon - Microsoft-Windows-Sysmon/Operational.
+# What is logged depends heavily on the Sysmon configuration in use
+# (e.g. SwiftOnSecurity or Olaf Hartong's sysmon-modular).
+
+- id: 1
+  channel: Microsoft-Windows-Sysmon/Operational
+  provider: Microsoft-Windows-Sysmon
+  name: Process creation
+  category: execution
+  criticality: low
+  description: >
+    A process was created. Richer than Security 4688 - includes hashes,
+    parent command line, original file name, integrity level and a
+    ProcessGuid for reliable correlation.
+  relevance: >
+    Core endpoint telemetry. OriginalFileName catches renamed LOLBins
+    (e.g. a renamed powershell.exe), ParentCommandLine shows full execution
+    chains, and hashes allow threat-intel lookups.
+  mitre: [T1059, T1036.003]
+  fields:
+    - name: Image / OriginalFileName
+      note: A mismatch (Image=update.exe, OriginalFileName=PowerShell.EXE) indicates a renamed binary.
+    - name: CommandLine / ParentCommandLine
+      note: Full command lines of child and parent.
+    - name: ParentImage
+      note: Unusual parents - Office apps, wmiprvse.exe, w3wp.exe (web shells), services.exe.
+    - name: Hashes
+      note: Configured hash types (SHA256, IMPHASH ...).
+    - name: IntegrityLevel / User
+      note: High/System integrity for processes spawned from user contexts suggests escalation.
+    - name: ProcessGuid
+      note: Unique ID to correlate with Sysmon 3, 7, 8, 10, 11.
+  investigate:
+    - Check parent-child relationships and command lines against known attack patterns.
+    - Look up hashes in threat intel.
+    - Pivot on ProcessGuid to see network, file and registry activity of the process.
+  false_positives:
+    - High volume; depends on configuration filtering.
+  related: [4688, 3, 11]
+
+- id: 3
+  channel: Microsoft-Windows-Sysmon/Operational
+  provider: Microsoft-Windows-Sysmon
+  name: Network connection detected
+  category: network
+  criticality: low
+  description: >
+    A process made a TCP/UDP network connection. Usually filtered heavily in
+    Sysmon configs.
+  relevance: >
+    Ties network connections to the responsible process - key for spotting
+    C2 beacons, LOLBins reaching the internet (certutil, mshta, rundll32,
+    regsvr32) and lateral movement (445, 5985, 3389 from unusual processes).
+  mitre: [T1071, T1105]
+  fields:
+    - name: Image / ProcessGuid
+      note: Process that made the connection.
+    - name: DestinationIp / DestinationHostname / DestinationPort
+      note: Remote endpoint.
+    - name: Initiated
+      note: true = outbound.
+  investigate:
+    - Flag scripting hosts and LOLBins with outbound connections to external IPs.
+    - Look for periodic connections (beaconing) to the same destination.
+  false_positives:
+    - Browsers, updaters and cloud agents.
+  related: [1, 22, 5156]
+
+- id: 7
+  channel: Microsoft-Windows-Sysmon/Operational
+  provider: Microsoft-Windows-Sysmon
+  name: Image loaded
+  category: defense-evasion
+  criticality: low
+  description: >
+    A module (DLL) was loaded by a process. Very noisy; usually filtered to
+    specific DLLs or unsigned modules.
+  relevance: >
+    Detects DLL side-loading/hijacking (signed binary loading an unsigned DLL
+    from its own folder), and suspicious loads such as clr.dll in
+    non-.NET processes (in-memory .NET execution) or dbghelp.dll/dbgcore.dll
+    into processes that dump LSASS.
+  mitre: [T1574.001]
+  fields:
+    - name: Image / ImageLoaded
+      note: Process and DLL path.
+    - name: Signed / Signature / SignatureStatus
+      note: Unsigned DLLs loaded by signed binaries from user-writable paths are suspicious.
+  investigate:
+    - Look for known side-loading pairs and DLLs in %TEMP%, %APPDATA% or the binary's own non-standard folder.
+  false_positives:
+    - Extremely noisy without filtering.
+  related: [1]
+
+- id: 8
+  channel: Microsoft-Windows-Sysmon/Operational
+  provider: Microsoft-Windows-Sysmon
+  name: CreateRemoteThread detected
+  category: defense-evasion
+  criticality: high
+  description: >
+    A process created a thread in another process.
+  relevance: >
+    A classic process injection technique used by malware and C2 frameworks
+    to run code inside a legitimate process (explorer.exe, svchost.exe,
+    rundll32.exe).
+  mitre: [T1055]
+  fields:
+    - name: SourceImage / TargetImage
+      note: Injecting and injected processes.
+    - name: StartAddress / StartModule / StartFunction
+      note: Threads starting in no module (blank StartModule) indicate shellcode.
+  investigate:
+    - Review any source that is not a known debugger, AV or system component.
+  false_positives:
+    - Some AV/EDR products, debuggers and accessibility tools.
+  related: [10, 1]
+
+- id: 10
+  channel: Microsoft-Windows-Sysmon/Operational
+  provider: Microsoft-Windows-Sysmon
+  name: Process accessed
+  category: credential-access
+  criticality: high
+  description: >
+    A process opened a handle to another process. Typically configured to
+    log access to lsass.exe.
+  relevance: >
+    The go-to detection for LSASS credential dumping (Mimikatz, procdump,
+    comsvcs.dll MiniDump, nanodump). GrantedAccess and CallTrace reveal the
+    intent of the access.
+  mitre: [T1003.001]
+  fields:
+    - name: SourceImage
+      note: Process opening the handle.
+    - name: TargetImage
+      note: C:\Windows\system32\lsass.exe is the key target.
+    - name: GrantedAccess
+      note: 0x1010, 0x1410, 0x1FFFFF, 0x1438 are commonly seen with credential dumping.
+    - name: CallTrace
+      note: DLLs in the call stack - dbghelp.dll/dbgcore.dll (MiniDumpWriteDump) or UNKNOWN regions (injected code).
+  investigate:
+    - Review every non-allow-listed SourceImage accessing lsass.exe.
+    - Check for dump files written shortly after (Sysmon 11, *.dmp).
+    - Assume credentials on the host are compromised if confirmed.
+  false_positives:
+    - AV/EDR, MsMpEng.exe, wmiprvse.exe, Task Manager and some monitoring agents.
+  related: [4656, 8, 11]
+  detection: "EventID=10 AND TargetImage ends with '\\lsass.exe' AND GrantedAccess IN (0x1010,0x1410,0x1438,0x143a,0x1FFFFF) AND SourceImage NOT IN (allow-list) -> alert (critical)."
+
+- id: 11
+  channel: Microsoft-Windows-Sysmon/Operational
+  provider: Microsoft-Windows-Sysmon
+  name: File created
+  category: execution
+  criticality: low
+  description: >
+    A file was created or overwritten.
+  relevance: >
+    Captures payload drops (executables/scripts in Temp, Startup, ProgramData),
+    LSASS dump files, web shells written to web roots, and ransomware notes.
+  mitre: [T1105, T1547.001]
+  fields:
+    - name: Image
+      note: Process that created the file.
+    - name: TargetFilename
+      note: Path created - Startup folders, %TEMP%\*.exe, *.dmp, inetpub\wwwroot\*.aspx are high interest.
+  investigate:
+    - Hash and analyse dropped executables and scripts.
+    - Check whether the dropped file is executed later (Sysmon 1).
+  false_positives:
+    - Installers, browsers (downloads), updaters.
+  related: [1, 10]
+
+- id: 12
+  channel: Microsoft-Windows-Sysmon/Operational
+  provider: Microsoft-Windows-Sysmon
+  name: Registry object added or deleted
+  category: persistence
+  criticality: low
+  description: >
+    A registry key or value was created or deleted.
+  relevance: >
+    Shows creation of persistence keys (services, IFEO debugger keys, COM
+    hijacks) and deletion of keys to cover tracks.
+  mitre: [T1112, T1546.012]
+  fields:
+    - name: EventType
+      note: CreateKey or DeleteKey / DeleteValue.
+    - name: TargetObject
+      note: Registry path.
+    - name: Image
+      note: Process that made the change.
+  investigate:
+    - Review keys under Image File Execution Options, CLSID\*\InprocServer32 and Services.
+  false_positives:
+    - Software installs and Windows internals.
+  related: [13]
+
+- id: 13
+  channel: Microsoft-Windows-Sysmon/Operational
+  provider: Microsoft-Windows-Sysmon
+  name: Registry value set
+  category: persistence
+  criticality: medium
+  description: >
+    A registry value was written, including the data written.
+  relevance: >
+    The primary detection for registry-based persistence (Run/RunOnce keys,
+    Winlogon Shell/Userinit, services ImagePath) and defense evasion
+    (disabling Defender via policies, adding exclusions).
+  mitre: [T1547.001, T1112, T1562.001]
+  fields:
+    - name: TargetObject
+      note: Value path - e.g. HKCU\Software\Microsoft\Windows\CurrentVersion\Run\*.
+    - name: Details
+      note: Data written - look for paths in user-writable directories, LOLBins or encoded commands.
+    - name: Image
+      note: Process that wrote the value.
+  investigate:
+    - Alert on Run key writes pointing to %APPDATA%, %TEMP% or scripting hosts.
+    - Watch for DisableAntiSpyware / DisableRealtimeMonitoring and Defender Exclusions writes.
+  false_positives:
+    - Legitimate software registering autostart entries.
+  related: [12, 4657]
+
+- id: 22
+  channel: Microsoft-Windows-Sysmon/Operational
+  provider: Microsoft-Windows-Sysmon
+  name: DNS query
+  category: network
+  criticality: low
+  description: >
+    A process performed a DNS query (Windows 8.1+ / Server 2012 R2+).
+  relevance: >
+    Links DNS lookups to processes - spot C2 domains, DGA-looking names,
+    DNS tunnelling (long random subdomains), and LOLBins resolving
+    pastebin/github/file-sharing domains.
+  mitre: [T1071.004, T1568.002]
+  fields:
+    - name: QueryName
+      note: Domain queried.
+    - name: QueryResults
+      note: Resolved addresses.
+    - name: Image
+      note: Process that made the query.
+  investigate:
+    - Check rare domains against threat intel; look for high-entropy subdomains.
+    - Flag scripting hosts or Office apps querying file-sharing / paste sites.
+  false_positives:
+    - Browsers and cloud agents generate large volumes.
+  related: [3]
