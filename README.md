@@ -3,6 +3,7 @@
 [![CI](https://github.com/MrWaifu24/weix/actions/workflows/ci.yml/badge.svg)](https://github.com/MrWaifu24/weix/actions/workflows/ci.yml)
 [![Go](https://img.shields.io/badge/go-1.23%2B-00ADD8?logo=go)](go.mod)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+<a href="https://www.namtao.com/0rwx/"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/ai-w-dark.svg"><img src=".github/ai-w-light.svg" alt="AI use: Level W (Write), with help from an AI co-writer" height="20"></picture></a>
 
 `weix` is a command-line utility that explains Windows Event IDs for SOC analysts. You give it an event ID and it tells you:
 
